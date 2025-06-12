@@ -1,0 +1,50 @@
+# Using the PosiGene pipeline to identify orthologous genes among three species
+# Pipeline name: Ortholog Identification
+
+/usr/bin/perl /home/mengfw/skin_cavefish/PosiGene/PosiGene.pl \
+-mode=all \
+-tree_file=/home/mengfw/skin_cavefish/tree \
+-o=. \
+-as= Drerio \
+-tn=40 \
+-rs= Drerio:/home/mengfw/skin_cavefish/cds/Drerio.cds.fasta \
+-ts=Trosa \
+-bn=Trosa \
+-nhsbr=Danio_rerio:/home/mengfw/skin_cavefish/cds/Drerio.cds.fasta,Trosa:/home/mengfw/skin_cavefish/cds/Trosa.cds.fasta,Tstenura:/home/mengfw/skin_cavefish/cds/Tstenura.cds.fasta
+echo " Ortholog Identification completed successfully"
+date
+
+#Perl Script for Running Branch Models on PosiGene Ortholog Alignments
+
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+$gene=shift;
+if(-e "/home/mengfw/skin_cavefish/01.posigene/individual_results/$gene/Drerio/$gene\_codeml/"){
+	chdir("/home/mengfw/skin_cavefish/01.posigene/individual_results/$gene/Drerio/$gene\_codeml/");
+	system("sed 's/#1//' $gene\_tree\_Trosa.newick > tree");
+	system("sed 's/\(.*\)//g' prank/prank.best.fas\_Trosa.renamed |sed 's/*//'> nuc");
+	system("ln -s /home/mengfw/skin_cavefish/codeml.ctl");
+	system("codeml codeml.ctl");}
+
+#Perl Script for Extracting Ka, Ks, and omega values from PAML (codeml) Outputs
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+$gene=shift;
+open(OUT,">>stat.xls");
+if(-e "/home/mengfw/skin_cavefish/01.posigene/individual_results/$gene/Drerio/$gene\_codeml/mlc2"){
+print OUT "$gene\t";
+open(IN," /home/mengfw/skin_cavefish/01.posigene/individual_results/$gene/Drerio/$gene\_codeml/mlc2");
+@mlc=<IN>;
+$dS=$mlc[-9];
+$dN=$mlc[-7];
+$w=$mlc[-4];
+$dN =~ /\(Trosa: ([^,]+), Tstenura: ([^,]+), Drerio: ([^)]+)\);/;
+print OUT "$1\t$2\t$3\t";
+$dS =~ /\(Trosa: ([^,]+), Tstenura: ([^,]+), Drerio: ([^)]+)\);/;
+print OUT "$1\t$2\t$3\t";
+$w  =~ /\(Trosa \#(\S+) , Tstenura \#(\S+) , Drerio \#(\S+) \);/;
+print OUT "$1\t$2\t$3\n";}
