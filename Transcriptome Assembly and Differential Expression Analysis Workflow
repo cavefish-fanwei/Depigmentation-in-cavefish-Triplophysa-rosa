@@ -1,0 +1,156 @@
+# Part I: Fastp Processing of Raw Reads
+
+#!/bin/bash
+
+cd /home/mengfw/1.skin_RNA_rawdata
+for i in *R1.fq.gz
+do
+  base=${i%_R1.fq.gz}
+  /home/software/miniconda3/bin/fastp -i ${base}_R1.fq.gz -I ${base}_R2.fq.gz \
+    -o /home/mengfw/2.skin_RNA_clean_data/${base}_R1_clean.fq.gz \
+    -O /home/mengfw/2.skin_RNA_clean_data/${base}_R2_clean.fq.gz \
+    -w 10 \
+    --html /home/mengfw/2.skin_RNA_clean_data/${base}.html \
+    --json /home/mengfw/2.skin_RNA_clean_data/${base}.json
+done
+echo "All fastp processing completed"
+
+# Part II: Transcriptome Assembly
+#!/bin/bash
+
+source activate Trinity
+cd /home/mengfw/skin_cavefish/2.skin_RNA_clean_data
+
+exec > /home/mengfw/skin_cavefish/2.skin_RNA_clean_data/trinity.out \
+2> /home/mengfw/skin_cavefish/2.skin_RNA_clean_data/trinity.err
+
+# Start Trinity assembly for Trosa
+Trinity --seqType fq --max_memory 30G --CPU 20 \
+  --left Triplophysa_rosa_1_R1_clean.fq,Triplophysa_rosa_2_R1_clean.fq,Triplophysa_rosa_3_R1_clean.fq \
+  --right Triplophysa_rosa_1_R2_clean.fq,Triplophysa_rosa_2_R2_clean.fq,Triplophysa_rosa_3_R2_clean.fq \
+  --output /home/mengfw/skin_cavefish/trinity_Trosa/3.Triplophysa_transcriptome \
+  --full_cleanup
+wait
+
+# Start Trinity assembly for Tstrnure
+Trinity --seqType fq --max_memory 30G --CPU 20 \
+  --left Triplophysa_stenura_1_R1_clean.fq,Triplophysa_stenura_2_R1_clean.fq,Triplophysa_stenura_3_R1_clean.fq \
+  --right Triplophysa_stenura_1_R2_clean.fq,Triplophysa_stenura_2_R2_clean.fq,Triplophysa_stenura_3_R2_clean.fq \
+  --output /home/mengfw/skin_cavefish/trinity_Tstenura \
+  --full_cleanup
+wait
+echo "All Trinity assemblies completed"
+
+# Part III: Read Alignment and Transcript Quantification
+
+#!/bin/bash
+
+# Define base directories
+transcriptome_dir="/home/mengfw/skin_cavefish"
+data_dir="/home/mengfw/skin_cavefish/2.skin_RNA_clean_data"
+output_dir="/home/mengfw/skin_cavefish/quant"
+
+cd "$output_dir"
+bowtie-build "$transcriptome_dir/Trosa_transcriptome.fasta" Trosa_index
+samples=("Triplophysa_rosa_1" "Triplophysa_rosa_2" "Triplophysa_rosa_3")
+
+# Alignment and quantification
+for sample in "${samples[@]}"; do
+    echo "Processing $sample"
+    # Bowtie alignment to transcriptome
+    bowtie2 -S -p 10 Trosa_index \
+           -1 "$data_dir/${sample}_R1_clean.fq" \
+           -2 "$data_dir/${sample}_R2_clean.fq" \
+           > ${sample}_mapping.sam
+
+    samtools view -@ 8 -bS ${sample}_mapping.sam > ${sample}.bam
+    samtools sort -@ 8 ${sample}.bam -o ${sample}_sorted.bam
+    samtools index ${sample}_sorted.bam
+
+    # Salmon quantification (alignment-based mode)
+    salmon quant -t "$transcriptome_dir/Trosa_transcriptome.fasta" \
+                 -l IU \
+                 -a ${sample}_sorted.bam \
+                 -o salmon_quant_${sample} \
+                 -p 10 \
+                 --validateMappings
+done
+
+# Output TPMs are in salmon_quant_<sample>/quant.sf
+#The transcriptome assembly and quantification of T. stenura were conducted using the same workflow.
+
+# Step 4: Merge TPM and count matrices from Salmon outputs
+
+R-script
+# Set working directory to where Salmon quantification outputs are located
+setwd("/home/mengfw/skin_cavefish/quant")
+
+# List all quant.sf files recursively
+files <- list.files(path = ".", pattern = "quant.sf$", recursive = TRUE, full.names = TRUE)
+
+# Read the first file to extract transcript IDs
+data <- read.table(files[1], header = TRUE, sep = "\t")
+tpm_all <- data.frame(target_id = data$Name)
+count_all <- data.frame(target_id = data$Name)
+
+# Function to extract sample names from file paths
+get_sample_name <- function(path) {
+  strsplit(path, "/")[[1]][1] 
+}
+sample_names <- sapply(files, get_sample_name)
+
+# Loop through each file to extract TPM and estimated counts
+for (i in 1:length(files)) {
+  data <- read.table(files[i], header = TRUE, sep = "\t")
+  tpm_all <- merge(tpm_all, data$TPM)
+  count_all <- merge(count_all, data$NumReads)
+}
+
+colnames(tpm_all) <- c("target_id", sample_names)
+colnames(count_all) <- c("target_id", sample_names)
+
+# Write output files
+write.csv(tpm_all, file = "TPM_matrix_all.csv", row.names = FALSE, quote = TRUE)
+write.csv(count_all, file = "Count_matrix_all.csv", row.names = FALSE, quote = TRUE)
+
+# Step 5: Differential Expression Analysis using DESeq2
+
+R-script
+library("DESeq2")
+
+setwd("/home/mengfw/skin_cavefish/quant")
+
+# Load count matrix and phenotype/condition data
+count_data <- read.csv("Count_matrix_all.csv", row.names = 1, check.names = FALSE)
+col_data <- read.table("pheno.txt", header = TRUE, row.names = 1, check.names = FALSE)
+
+# Ensure the columns in count data match the rows in col_data
+all(colnames(count_data) == rownames(col_data))  # Should return TRUE
+
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(countData = count_data,
+                              colData = col_data,
+                              design = ~ condition)
+
+# Run DESeq2 standard pipeline
+dds <- DESeq(dds)
+
+# Extract results for contrast: cf vs sf
+res <- results(dds, contrast = c("condition", "cf", "sf"))
+
+resdata <- merge(as.data.frame(res), 
+                 as.data.frame(counts(dds, normalized = TRUE)), 
+                 by = "row.names", 
+                 sort = FALSE)
+
+write.csv(resdata, file = "DEG_cf_vs_sf.csv", row.names = FALSE)
+
+
+Example content of pheno.txt:
+sample_id	condition
+Triplophysa_rosa_1	cf
+Triplophysa_rosa_2	cf
+Triplophysa_rosa_3	cf
+Triplophysa_stenura_1	sf
+Triplophysa_stenura_2	sf
+Triplophysa_stenura_3	sf
